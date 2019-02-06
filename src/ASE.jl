@@ -1,4 +1,8 @@
 
+# using PyCall
+# @pyimport ase.io as ase_io
+# @pyimport ase.atoms as ase_atoms
+# @pyimport ase.build as ase_build
 
 
 module ASE
@@ -16,7 +20,7 @@ import JuLIP:
       calculator, set_calculator!, # ✓
       constraint, set_constraint!, # ✓
       neighbourlist,                # ✓
-      energy, forces, virial,
+      energy, forces, virial, stress,
       momenta, set_momenta!,
       masses, set_masses!,
       set_transient!,
@@ -25,7 +29,7 @@ import JuLIP:
       get_data, has_data, set_data!,
       bulk
 
-import Base.length, Base.deleteat!, Base.deepcopy        # ✓
+import Base.length, Base.deleteat!, Base.deepcopy
 
 # from arrayconversions:
 using JuLIP: mat, vecs, JVecF, JVecs, JVecsF, JMatF,
@@ -41,12 +45,12 @@ export ASEAtoms,      # ✓
       extend!, get_info, set_info!, get_array, set_array!, has_array, has_info,
       get_transient, has_transient,
       velocities, set_velocities!,
-      static_neighbourlist
+      static_neighbourlist,
+      read_xyz, write_xyz
 
-
-@pyimport ase.io as ase_io
-@pyimport ase.atoms as ase_atoms
 @pyimport ase.build as ase_build
+@pyimport ase.atoms as ase_atoms
+@pyimport ase.io as ase_io
 
 
 #################################################################
@@ -59,7 +63,7 @@ export ASEAtoms,      # ✓
 some data which needs to be updated if the configuration (positions only!) has
 changed too much.
 """
-struct TransientData
+mutable struct TransientData
    max_change::Float64    # how much X may change before recomputing
    accum_change::Float64   # how much has it changed already
    data::Any
@@ -77,7 +81,7 @@ Julia wrapper for the ASE `Atoms` class.
 
 For internal usage there is also a constructor `ASEAtoms(po::PyObject)`
 """
-mutable struct ASEAtoms <: AbstractAtoms
+type ASEAtoms <: AbstractAtoms
    po::PyObject       # ase.Atoms instance
    calc::AbstractCalculator
    cons::AbstractConstraint
@@ -107,7 +111,7 @@ ASEAtoms(s::AbstractString) = ASEAtoms(ase_atoms.Atoms(s))
 pyobject(a::ASEAtoms) = a.po
 
 
-length(at::ASEAtoms) = Int(at.po["positions"]["shape"][1])
+length(at::ASEAtoms) = size(at.po[:get_positions](), 1)
 
 
 """
@@ -130,7 +134,7 @@ JuLIP.Chemistry.rnn(s::AbstractString) = rnn(Symbol(s))
 # temporarily reverted to the old `positions` implementation
 # due to a bug in TightBinding.jl
 
-positions(at::ASEAtoms) = Matrix{Float64}(at.po[:positions])' |> vecs
+positions(at::ASEAtoms) = at.po[:get_positions]()' |> vecs
 
 
 function set_positions!(a::ASEAtoms, p::JVecsF)
@@ -299,11 +303,11 @@ import Base.*
 
 export graphene_nanoribbon, nanotube, molecule
 
-@doc ase_build.bulk[:__doc__] ->
+# @doc ase_build.bulk[:__doc__] ->
 bulk(s::AbstractString, args...; pbc=true, kwargs...) =
    set_pbc!(ASEAtoms(ase_build.bulk(s, args...; kwargs...)), pbc)
 
-@doc ase_build.graphene_nanoribbon[:__doc__] ->
+# @doc ase_build.graphene_nanoribbon[:__doc__] ->
 graphene_nanoribbon(args...; kwargs...) =
    ASEAtoms(ase_build.graphene_nanoribbon(args...; kwargs...))
 
@@ -320,45 +324,45 @@ function nanotube(args...; kwargs...)
    return at
 end
 
-@doc ase_build.molecule[:__doc__] ->
-      molecule(args...; kwargs...) =
-         ASEAtoms(ase_build.molecule(args...; kwargs...))
+# @doc ase_build.molecule[:__doc__] ->
+molecule(args...; kwargs...) =
+   ASEAtoms(ase_build.molecule(args...; kwargs...))
 
 
-############################################################
-# matscipy neighbourlist functionality
-############################################################
-
-include("MatSciPy.jl")
-
-function neighbourlist(at::ASEAtoms, cutoff::Float64;
-                        recompute=false)::MatSciPy.NeighbourList
-   # TODO: also recompute if rcut is different !!!!!
-   # if no previous neighbourlist is available, compute a new one
-   if !has_transient(at, (:nlist, cutoff)) || recompute
-      # this nlist will be destroyed as soon as positions change
-      set_transient!(at, (:nlist, cutoff), MatSciPy.NeighbourList(at, cutoff))
-   end
-   return get_transient(at, (:nlist, cutoff))
-end
-
-"""
-`static_neighbourlist(at::ASEAtoms, rcut::Float64)`
-
-This function first checks whether a static neighbourlist already exists
-with cutoff `rcut` and if it does then it returns the existing list.
-If it does not, then it computes a new neighbour list with the current
-configuration, stores it for later use and returns it.
-"""
-function static_neighbourlist(at::ASEAtoms, rcut::Float64)
-   if !has_transient(at, (:snlist, rcut))
-      set_transient!( at, (:snlist, rcut),
-                          MatSciPy.NeighbourList(at, rcut),
-                          Inf )    # Inf means this is never deleted!
-   end
-   return get_transient(at, (:snlist, rcut))
-end
-
+# ############################################################
+# # matscipy neighbourlist functionality
+# ############################################################
+#
+# include("MatSciPy.jl")
+#
+# function neighbourlist(at::ASEAtoms, cutoff::Float64;
+#                         recompute=false)::MatSciPy.NeighbourList
+#    # TODO: also recompute if rcut is different !!!!!
+#    # if no previous neighbourlist is available, compute a new one
+#    if !has_transient(at, (:nlist, cutoff)) || recompute
+#       # this nlist will be destroyed as soon as positions change
+#       set_transient!(at, (:nlist, cutoff), MatSciPy.NeighbourList(at, cutoff))
+#    end
+#    return get_transient(at, (:nlist, cutoff))
+# end
+#
+# """
+# `static_neighbourlist(at::ASEAtoms, rcut::Float64)`
+#
+# This function first checks whether a static neighbourlist already exists
+# with cutoff `rcut` and if it does then it returns the existing list.
+# If it does not, then it computes a new neighbour list with the current
+# configuration, stores it for later use and returns it.
+# """
+# function static_neighbourlist(at::ASEAtoms, rcut::Float64)
+#    if !has_transient(at, (:snlist, rcut))
+#       set_transient!( at, (:snlist, rcut),
+#                           MatSciPy.NeighbourList(at, rcut),
+#                           Inf )    # Inf means this is never deleted!
+#    end
+#    return get_transient(at, (:snlist, rcut))
+# end
+#
 
 ######################################################
 #    Attaching an ASE-style calculator
@@ -373,7 +377,7 @@ abstract type AbstractASECalculator <: AbstractCalculator end
 """
 Concrete subtype of ASECalculator for classical potentials
 """
-struct ASECalculator <: AbstractASECalculator
+mutable struct ASECalculator <: AbstractASECalculator
    po::PyObject
 end
 
@@ -447,42 +451,42 @@ end
 extend!(at::ASEAtoms, S::AbstractString, x::JVecF) = extend!(at, ASEAtoms(S, [x]))
 
 """
-* `write(filename, at, mode=:write)` : write atoms object to `filename`
-* `write(filehandle, at)` : write atoms object as xyz file
-* `write(filename, ats::Vector{ASEAtoms}, mode=:write)` : write a time series to a file
-* `write(filename, at, x::Vector{Dofs}, mode=:write)` : write a time series to a file
+* `write_xyz(filename, at, mode=:write)` : write atoms object to `filename`
+* `write_xyz(filehandle, at)` : write atoms object as xyz file
+* `write_xyz(filename, ats::Vector{ASEAtoms}, mode=:write)` : write a time series to a file
+* `write_xyz(filename, at, x::Vector{Dofs}, mode=:write)` : write a time series to a file
 
 to append to an existing file, use `:append` or `"a"` instead of `:write`.
 """
-write(filename::AbstractString, at::ASEAtoms, mode=:write) =
-   mode == :write ? ase_io.write(filename, at.po) : write(filename, [at], mode)
+write_xyz(filename::AbstractString, at::ASEAtoms, mode=:write) =
+   mode == :write ? ase_io.write(filename, at.po) : write_xyz(filename, [at], mode)
 
-write(filehandle::PyObject, at::ASEAtoms) = ase_io.write(filehandle, at.po, format="xyz")
+write_xyz(filehandle::PyObject, at::ASEAtoms) = ase_io.write(filehandle, at.po, format="xyz")
 
 # open and close files from Python (to get a python filehandle)
 pyopenf(filename::AbstractString, mode::AbstractString) = py"open($(filename), $(mode))"
 pyclosef(filehandle) = filehandle[:close]()
 
-function write(filename::AbstractString, at::ASEAtoms, xs::AbstractVector{Dofs}, mode=:write)
+function write_xyz(filename::AbstractString, at::ASEAtoms, xs::AbstractVector{Dofs}, mode=:write)
    x0 = dofs(at) # save the dofs
    filehandle = pyopenf(filename, string(mode)[1:1])
    for x in xs
-     write(filehandle, set_dofs!(at, x))
+     write_xyz(filehandle, set_dofs!(at, x))
    end
    pyclosef(filehandle)
    set_dofs!(at, x0)   # revert to original configuration
 end
 
-function write(filename::AbstractString, ats::AbstractVector{ASEAtoms}, mode=:write)
+function write_xyz(filename::AbstractString, ats::AbstractVector{ASEAtoms}, mode=:write)
    filehandle = pyopenf(filename, string(mode)[1:1])
    for at in ats
-      write(filehandle, at)
+      write_xyz(filehandle, at)
    end
    pyclosef(filehandle)
 end
 
 
-read(filename::AbstractString) = ASEAtoms(ase_io.read(filename))
+read_xyz(filename::AbstractString) = ASEAtoms(ase_io.read(filename))
 
 
 
@@ -517,5 +521,38 @@ end
 
 # ----------- The Julia implementation of EMT (kind of for fun) ----------
 # include("EMT.jl")
+
+
+
+# # -------------- JuLIP NeighbourList Patch -------------
+# using PyCall
+# import NeighbourLists
+# matscipy_neighbours = pyimport("matscipy.neighbours")
+# function asenlist(at::Atoms, rcut)
+#    pyat = ASEAtoms(at).po
+#    return matscipy_neighbours[:neighbour_list]("ijdD", pyat, rcut)
+# end
+#
+# function matscipy_nlist(at::Atoms{T}, rcut::T; recompute=false, kwargs...) where T <: AbstractFloat
+#    i, j, r, R = asenlist(at, rcut)
+#    i = copy(i)+1
+#    j = copy(j)+1
+#    r = copy(r)
+#    R = vecs(copy(R'))
+#    first = NeighbourLists.get_first(i, length(at))
+#    NeighbourLists.sort_neigs!(j, r, R, first)
+#    return NeighbourLists.PairList(positions(at), rcut, i, j, r, R, first)
+# end
+
+
+
+# -------------- Calling a JuLIP Calculator on ASEAtoms --------------
+
+
+
+energy(V::AbstractCalculator, at::ASEAtoms) = energy(V, Atoms(at))
+forces(V::AbstractCalculator, at::ASEAtoms) = forces(V, Atoms(at))
+virial(V::AbstractCalculator, at::ASEAtoms) = virial(V, Atoms(at))
+stress(V::AbstractCalculator, at::ASEAtoms) = stress(V, Atoms(at))
 
 end # module
